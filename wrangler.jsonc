@@ -1,8 +1,5 @@
- {
+  {
     "name": "betterclaude-workers",
     "main": "src/index.ts",
-    "compatibility_date": "2025-12-13",
-    "routes": [
-      { "pattern": "api.flyking.dpdns.org/*", "zone_name": "flyking.dpdns.org" }
-    ]
+    "compatibility_date": "2025-12-13"
   }
