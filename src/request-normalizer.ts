@@ -62,13 +62,16 @@ const MODEL_RULES: readonly ModelRule[] = [
  * Always force-set to override any client-supplied values (e.g. Python-urllib UA).
  */
 const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
+	['Accept', 'application/json'],
 	['User-Agent', 'claude-cli/2.1.38 (external, cli)'],
 	['X-Stainless-Arch', 'x64'],
 	['X-Stainless-Lang', 'js'],
 	['X-Stainless-OS', 'Windows'],
-	['X-Stainless-Package-Version', '0.51.0'],
+	['X-Stainless-Package-Version', '0.73.0'],
+	['X-Stainless-Retry-Count', '0'],
 	['X-Stainless-Runtime', 'node'],
-	['X-Stainless-Runtime-Version', 'v22.14.0'],
+	['X-Stainless-Runtime-Version', 'v24.3.0'],
+	['X-Stainless-Timeout', '600'],
 	['anthropic-dangerous-direct-browser-access', 'true'],
 	['x-app', 'cli'],
 ];
@@ -176,16 +179,22 @@ export function normalizeRequest(
 
 	// 6. Ensure minimal required body fields for upstream validation
 	if (!bodyObj.system) {
-		bodyObj.system = [{ type: 'text', text: 'You are Claude Code, a CLI assistant by Anthropic.' }];
+		bodyObj.system = [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }];
 	}
 	if (!Array.isArray(bodyObj.tools) || (bodyObj.tools as unknown[]).length === 0) {
 		bodyObj.tools = [
 			{
-				name: 'noop',
-				description: 'No-op placeholder tool',
+				name: 'placeholder',
+				description: 'placeholder tool',
 				input_schema: { type: 'object', properties: {} },
 			},
 		];
+	}
+	if (!bodyObj.metadata) {
+		bodyObj.metadata = { user_id: 'normalized-request' };
+	}
+	if (!bodyObj.max_tokens) {
+		bodyObj.max_tokens = 32000;
 	}
 
 	return {
