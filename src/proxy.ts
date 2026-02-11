@@ -171,8 +171,12 @@ function buildUpstreamHeaders(request: Request, targetHost: string): Headers {
  * @returns RetryResult with response and metadata
  */
 export async function proxyRequest(request: Request, route: RouteInfo): Promise<RetryResult> {
-	// Construct target URL
-	const targetUrl = `https://${route.targetHost}/${route.targetPath}${route.searchParams}`;
+	// Construct target URL — auto-append ?beta=true for anyrouter.top if missing
+	let searchParams = route.searchParams;
+	if (route.targetHost.toLowerCase().includes('anyrouter.top') && !searchParams.includes('beta=true')) {
+		searchParams = searchParams ? `${searchParams}&beta=true` : '?beta=true';
+	}
+	const targetUrl = `https://${route.targetHost}/${route.targetPath}${searchParams}`;
 
 	// Build headers with full client information preservation
 	let headers = buildUpstreamHeaders(request, route.targetHost);
