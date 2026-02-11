@@ -200,7 +200,15 @@ export function normalizeRequest(
 	stripBrowserHeaders(headers);
 	applyClaudeCodeHeaders(headers);
 
-	// 5. Force streaming
+	// 5. Normalize auth header: convert x-api-key to Authorization Bearer format
+	// Upstream may require Bearer format when claude-code beta is active
+	const apiKey = headers.get('x-api-key');
+	if (apiKey && !headers.get('Authorization')) {
+		headers.set('Authorization', `Bearer ${apiKey}`);
+		headers.delete('x-api-key');
+	}
+
+	// 6. Force streaming
 	bodyObj.stream = true;
 
 	// 6. Ensure minimal required body fields for upstream validation
