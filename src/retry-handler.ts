@@ -29,6 +29,10 @@ async function makeApiCall(
 	headers: Headers,
 	body: string
 ): Promise<Response> {
+	// Body may differ between attempts (proactive cleanup / retry); never
+	// forward a stale content-length — let the runtime compute framing.
+	headers.delete('content-length');
+
 	return fetch(targetUrl, {
 		method: request.method,
 		headers,
