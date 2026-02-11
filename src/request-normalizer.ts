@@ -90,6 +90,31 @@ function findMatchingRule(model: string): ModelRule | undefined {
 }
 
 /**
+ * Browser fingerprint headers that must be stripped for anyrouter.top.
+ * Electron/browser clients (e.g. Cherry Studio) send these automatically;
+ * their presence exposes the request as non-CLI and triggers upstream rejection.
+ */
+const BROWSER_FINGERPRINT_HEADERS: readonly string[] = [
+	'sec-ch-ua',
+	'sec-ch-ua-platform',
+	'sec-ch-ua-mobile',
+	'sec-fetch-site',
+	'sec-fetch-mode',
+	'sec-fetch-dest',
+	'accept-language',
+	'accept-encoding',
+	'priority',
+	'origin',
+	'referer',
+];
+
+function stripBrowserHeaders(headers: Headers): void {
+	for (const key of BROWSER_FINGERPRINT_HEADERS) {
+		headers.delete(key);
+	}
+}
+
+/**
  * Force-set Claude Code identification headers.
  * These are always overwritten (not "fill if missing") because the client's
  * original User-Agent / fingerprint headers would expose the real caller
@@ -171,7 +196,8 @@ export function normalizeRequest(
 		delete bodyObj.temperature;
 	}
 
-	// 4. Force Claude Code identification headers
+	// 4. Strip browser fingerprint headers then force Claude Code identity
+	stripBrowserHeaders(headers);
 	applyClaudeCodeHeaders(headers);
 
 	// 5. Force streaming
