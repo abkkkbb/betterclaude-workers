@@ -8,6 +8,7 @@
 
 import type { RouteInfo } from './router';
 import { retryWithCleanup, type RetryResult } from './retry-handler';
+import { normalizeRequest } from './request-normalizer';
 
 /**
  * Hop-by-hop headers that should not be forwarded
@@ -174,7 +175,7 @@ export async function proxyRequest(request: Request, route: RouteInfo): Promise<
 	const targetUrl = `https://${route.targetHost}/${route.targetPath}${route.searchParams}`;
 
 	// Build headers with full client information preservation
-	const headers = buildUpstreamHeaders(request, route.targetHost);
+	let headers = buildUpstreamHeaders(request, route.targetHost);
 
 	// Determine if request should include body (non-GET methods)
 	const method = request.method;
@@ -228,7 +229,15 @@ export async function proxyRequest(request: Request, route: RouteInfo): Promise<
 	let bodyText: string | undefined;
 	try {
 		bodyText = await request.text();
-		const body = JSON.parse(bodyText);
+		let body = JSON.parse(bodyText);
+
+		// Normalize request for anyrouter.top upstream (adjusts headers + body per model)
+		const normalized = normalizeRequest(route.targetHost, headers, body, bodyText);
+		if (normalized.normalized) {
+			headers = normalized.headers;
+			body = normalized.body;
+			bodyText = normalized.bodyText;
+		}
 
 		// If request has messages field, use retry handler
 		if (body.messages && Array.isArray(body.messages)) {
