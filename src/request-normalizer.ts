@@ -58,8 +58,8 @@ const MODEL_RULES: readonly ModelRule[] = [
 ];
 
 /**
- * Default headers that identify the request as coming from Claude Code CLI.
- * Only set when the header is not already present in the request.
+ * Headers that identify the request as coming from Claude Code CLI.
+ * Always force-set to override any client-supplied values (e.g. Python-urllib UA).
  */
 const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['User-Agent', 'claude-cli/2.1.38 (external, cli)'],
@@ -86,11 +86,15 @@ function findMatchingRule(model: string): ModelRule | undefined {
 	return MODEL_RULES.find((rule) => lower.includes(rule.keyword));
 }
 
-function ensureClaudeCodeHeaders(headers: Headers): void {
+/**
+ * Force-set Claude Code identification headers.
+ * These are always overwritten (not "fill if missing") because the client's
+ * original User-Agent / fingerprint headers would expose the real caller
+ * and get blocked by upstream Cloudflare bot-detection (error 1010).
+ */
+function applyClaudeCodeHeaders(headers: Headers): void {
 	for (const [key, value] of CLAUDE_CODE_HEADERS) {
-		if (!headers.has(key)) {
-			headers.set(key, value);
-		}
+		headers.set(key, value);
 	}
 }
 
@@ -106,8 +110,9 @@ function ensureClaudeCodeHeaders(headers: Headers): void {
  *   1. Overwrites the `anthropic-beta` header with the model-specific value
  *   2. Sets or removes `body.thinking` per model requirements
  *   3. Removes `body.temperature` when thinking is active
- *   4. Fills in missing Claude Code identification headers
+ *   4. Force-sets Claude Code identification headers (always overwrite)
  *   5. Forces `body.stream = true`
+ *   6. Ensures `body.system` and `body.tools` have default values
  *
  * For unrecognised models or non-anyrouter targets the request passes through
  * unmodified.
@@ -163,11 +168,25 @@ export function normalizeRequest(
 		delete bodyObj.temperature;
 	}
 
-	// 4. Ensure Claude Code identification headers
-	ensureClaudeCodeHeaders(headers);
+	// 4. Force Claude Code identification headers
+	applyClaudeCodeHeaders(headers);
 
 	// 5. Force streaming
 	bodyObj.stream = true;
+
+	// 6. Ensure minimal required body fields for upstream validation
+	if (!bodyObj.system) {
+		bodyObj.system = [{ type: 'text', text: 'You are Claude Code, a CLI assistant by Anthropic.' }];
+	}
+	if (!Array.isArray(bodyObj.tools) || (bodyObj.tools as unknown[]).length === 0) {
+		bodyObj.tools = [
+			{
+				name: 'noop',
+				description: 'No-op placeholder tool',
+				input_schema: { type: 'object', properties: {} },
+			},
+		];
+	}
 
 	return {
 		headers,
