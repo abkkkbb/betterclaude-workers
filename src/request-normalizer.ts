@@ -216,8 +216,10 @@ export function normalizeRequest(
 		headers.delete('x-api-key');
 	}
 
-	// 6. Force streaming
-	bodyObj.stream = true;
+	// 6. Default to streaming if not explicitly set by client
+	if (bodyObj.stream === undefined || bodyObj.stream === null) {
+		bodyObj.stream = true;
+	}
 
 	// 7. Ensure minimal required body fields for upstream validation
 	// When claude-code beta is active (sonnet/opus), upstream validates that the
