@@ -39,26 +39,18 @@ export default {
 			// Parse request URL to extract route
 			const route = parseRoute(url);
 
-			// Validate route (return 400 if invalid)
+			// Validate route (return 400 if invalid or unrecognised path)
 			if (!route) {
-				return new Response('Invalid endpoint. Required format: /claude/{host}/{path}', {
-					status: 400,
-					headers: { 'Content-Type': 'text/plain' },
-				});
-			}
-
-			// Validate endpoint must contain v1/messages
-			if (!route.targetPath.includes('v1/messages')) {
 				return new Response(
 					JSON.stringify({
 						type: 'error',
 						error: {
-							type: 'forbidden',
-							message: 'Invalid endpoint. Path must contain v1/messages',
+							type: 'invalid_request',
+							message: 'Invalid endpoint. Use /claude/{host}/v1/messages',
 						},
 					}),
 					{
-						status: 403,
+						status: 400,
 						headers: { 'Content-Type': 'application/json' },
 					}
 				);
