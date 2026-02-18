@@ -259,10 +259,10 @@ export function normalizeRequest(
 		headers.delete('x-api-key');
 	}
 
-	// 6. Default to streaming if not explicitly set by client
-	if (bodyObj.stream === undefined || bodyObj.stream === null) {
-		bodyObj.stream = true;
-	}
+	// 6. Preserve client's stream setting.
+	// Real CLI always sends stream=true explicitly.
+	// Non-CLI test endpoints (new-api channel test) may omit it or set false,
+	// and expect a non-streaming JSON response. Do NOT force stream=true.
 
 	// 7. Ensure body fields satisfy upstream claude-code validation.
 	// For claude-code models (sonnet/opus): enforce full 3-segment system
