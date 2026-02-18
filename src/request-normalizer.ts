@@ -78,6 +78,7 @@ const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['X-Stainless-Runtime-Version', 'v24.3.0'],
 	['X-Stainless-Timeout', '600'],
 	['anthropic-dangerous-direct-browser-access', 'true'],
+	['anthropic-version', '2023-06-01'],
 	['x-app', 'cli'],
 ];
 
@@ -107,7 +108,6 @@ const BROWSER_FINGERPRINT_HEADERS: readonly string[] = [
 	'sec-fetch-mode',
 	'sec-fetch-dest',
 	'accept-language',
-	'accept-encoding',
 	'priority',
 	'origin',
 	'referer',
@@ -146,8 +146,8 @@ function applyClaudeCodeHeaders(headers: Headers): void {
  *   4. Strips browser fingerprint headers and force-sets Claude Code identity
  *   5. Normalizes auth header (x-api-key → Authorization Bearer)
  *   6. Forces `body.stream = true`
- *   7. Ensures `body.system`, `body.tools`, `body.metadata`, `body.max_tokens`
- *      have valid defaults (system is always overwritten for claude-code models)
+ *   7. Ensures `body.system`, `body.tools`, `body.metadata`, `body.max_tokens` have
+ *      valid defaults (preserves client-provided system/tools when present)
  *   8. Removes stale `content-length` so fetch() recalculates from new body
  *
  * For unrecognised models or non-anyrouter targets the request passes through
@@ -222,21 +222,27 @@ export function normalizeRequest(
 	}
 
 	// 7. Ensure minimal required body fields for upstream validation
-	// When claude-code beta is active (sonnet/opus), upstream validates that the
-	// request looks like a genuine Claude Code CLI call — always overwrite system.
-	if (rule.requireClaudeCodeIdentity) {
-		bodyObj.system = [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }];
-	} else if (!bodyObj.system) {
-		bodyObj.system = [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }];
-	}
-	if (!Array.isArray(bodyObj.tools) || (bodyObj.tools as unknown[]).length === 0) {
-		bodyObj.tools = [
+	// Preserve client-provided system prompt when present; only fill defaults
+	// when system is missing or empty. This avoids destroying the caller's
+	// actual instructions and cache_control markers.
+	const hasValidSystem =
+		(Array.isArray(bodyObj.system) && (bodyObj.system as unknown[]).length > 0) ||
+		(typeof bodyObj.system === 'string' && (bodyObj.system as string).trim().length > 0);
+
+	if (!hasValidSystem) {
+		bodyObj.system = [
 			{
-				name: 'placeholder',
-				description: 'placeholder tool',
-				input_schema: { type: 'object', properties: {} },
+				type: 'text',
+				text: "You are Claude Code, Anthropic's official CLI for Claude.",
+				...(rule.requireClaudeCodeIdentity ? { cache_control: { type: 'ephemeral' } } : {}),
 			},
 		];
+	}
+
+	// Empty tools array [] is valid (e.g. haiku topic-detection requests).
+	// Only fill when tools is entirely missing or not an array.
+	if (bodyObj.tools === undefined || !Array.isArray(bodyObj.tools)) {
+		bodyObj.tools = [];
 	}
 	if (!bodyObj.metadata) {
 		bodyObj.metadata = { user_id: 'normalized-request' };
