@@ -6,6 +6,13 @@
  * target host is anyrouter.top.
  */
 
+import {
+	BILLING_HEADER_TEXT,
+	IDENTITY_TEXT,
+	SYSTEM_INSTRUCTIONS_TEXT,
+	CLAUDE_CODE_TOOLS,
+} from './claude-code-identity';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -55,7 +62,7 @@ const MODEL_RULES: readonly ModelRule[] = [
 	{
 		keyword: 'opus',
 		anthropicBeta:
-			'claude-code-20250219,prompt-caching-scope-2026-01-05,effort-2025-11-24,adaptive-thinking-2026-01-28',
+			'claude-code-20250219,adaptive-thinking-2026-01-28,prompt-caching-scope-2026-01-05,effort-2025-11-24',
 		thinking: { type: 'adaptive' },
 		removeTemperature: true,
 		requireClaudeCodeIdentity: true,
@@ -68,11 +75,12 @@ const MODEL_RULES: readonly ModelRule[] = [
  */
 const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['Accept', 'application/json'],
-	['User-Agent', 'claude-cli/2.1.38 (external, cli)'],
+	['Accept-Encoding', 'gzip, deflate, br, zstd'],
+	['User-Agent', 'claude-cli/2.1.45 (external, cli)'],
 	['X-Stainless-Arch', 'x64'],
 	['X-Stainless-Lang', 'js'],
 	['X-Stainless-OS', 'Windows'],
-	['X-Stainless-Package-Version', '0.73.0'],
+	['X-Stainless-Package-Version', '0.74.0'],
 	['X-Stainless-Retry-Count', '0'],
 	['X-Stainless-Runtime', 'node'],
 	['X-Stainless-Runtime-Version', 'v24.3.0'],
@@ -82,114 +90,8 @@ const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['x-app', 'cli'],
 ];
 
-/** System prompt identity text that upstream expects as the first system block */
-const CLAUDE_CODE_IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude.";
-
 /** Pattern for Claude Code session user_id: user_{hex}_account__session_{uuid} */
 const CLAUDE_CODE_USER_ID_PATTERN = /^user_[a-f0-9]+_account__session_[0-9a-f-]{36}$/;
-
-/**
- * Minimal set of Claude Code tools that upstream expects for claude-code mode.
- * Tool names and parameter names match real Claude Code CLI definitions.
- */
-const MINIMAL_CLAUDE_CODE_TOOLS: ReadonlyArray<Record<string, unknown>> = [
-	{
-		name: 'Bash',
-		description: 'Executes a given bash command with optional timeout.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				command: { description: 'The command to execute', type: 'string' },
-				timeout: { description: 'Optional timeout in milliseconds (max 600000)', type: 'number' },
-				description: { description: 'Description of what this command does', type: 'string' },
-			},
-			required: ['command'],
-			additionalProperties: false,
-		},
-	},
-	{
-		name: 'Read',
-		description: 'Reads a file from the local filesystem.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				file_path: { description: 'The absolute path to the file to read', type: 'string' },
-				offset: { description: 'The line number to start reading from', type: 'number' },
-				limit: { description: 'The number of lines to read', type: 'number' },
-			},
-			required: ['file_path'],
-			additionalProperties: false,
-		},
-	},
-	{
-		name: 'Edit',
-		description: 'Performs exact string replacements in files.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				file_path: { description: 'The absolute path to the file to modify', type: 'string' },
-				old_string: { description: 'The text to replace', type: 'string' },
-				new_string: { description: 'The text to replace it with', type: 'string' },
-				replace_all: { description: 'Replace all occurrences', default: false, type: 'boolean' },
-			},
-			required: ['file_path', 'old_string', 'new_string'],
-			additionalProperties: false,
-		},
-	},
-	{
-		name: 'Write',
-		description: 'Writes a file to the local filesystem.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				file_path: { description: 'The absolute path to the file to write', type: 'string' },
-				content: { description: 'The content to write to the file', type: 'string' },
-			},
-			required: ['file_path', 'content'],
-			additionalProperties: false,
-		},
-	},
-	{
-		name: 'Glob',
-		description: 'Fast file pattern matching tool that works with any codebase size.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				pattern: { description: 'The glob pattern to match files against', type: 'string' },
-				path: { description: 'The directory to search in', type: 'string' },
-			},
-			required: ['pattern'],
-			additionalProperties: false,
-		},
-	},
-	{
-		name: 'Grep',
-		description: 'A powerful search tool built on ripgrep.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				pattern: { description: 'The regex pattern to search for', type: 'string' },
-				path: { description: 'File or directory to search in', type: 'string' },
-			},
-			required: ['pattern'],
-			additionalProperties: false,
-		},
-	},
-	{
-		name: 'Task',
-		description: 'Launch a new agent to handle complex, multi-step tasks autonomously.',
-		input_schema: {
-			type: 'object',
-			properties: {
-				description: { description: 'A short description of the task', type: 'string' },
-				prompt: { description: 'The task for the agent to perform', type: 'string' },
-				subagent_type: { description: 'The type of specialized agent to use', type: 'string' },
-			},
-			required: ['description', 'prompt', 'subagent_type'],
-			additionalProperties: false,
-		},
-	},
-];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -210,19 +112,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Normalize system field to array format.
- * Handles: array (pass-through), string (wrap in text block), other (empty).
+ * Handles: array (pass-through), string (wrap in text block),
+ * single object block (wrap in array), other (empty).
  */
 function normalizeSystemToArray(system: unknown): unknown[] {
 	if (Array.isArray(system)) return [...system];
 	if (typeof system === 'string' && system.trim().length > 0) {
 		return [{ type: 'text', text: system }];
 	}
+	if (isRecord(system) && typeof system.type === 'string') {
+		return [{ ...system }];
+	}
 	return [];
 }
 
 /** Check whether a system block contains the Claude Code identity text */
 function hasClaudeCodeIdentity(block: unknown): boolean {
-	return isRecord(block) && typeof block.text === 'string' && block.text.includes(CLAUDE_CODE_IDENTITY_TEXT);
+	return isRecord(block) && typeof block.text === 'string' && block.text.includes(IDENTITY_TEXT);
 }
 
 /** Generate a user_id matching the Claude Code session format */
@@ -359,34 +265,67 @@ export function normalizeRequest(
 	}
 
 	// 7. Ensure body fields satisfy upstream claude-code validation.
-	// For claude-code models (sonnet/opus): enforce identity shape while
-	// preserving the client's own system content alongside it.
+	// For claude-code models (sonnet/opus): enforce full 3-segment system
+	// structure [billing, identity, instructions] plus tools and metadata.
 	if (rule.requireClaudeCodeIdentity) {
-		// --- system: ensure Claude Code identity is the first element ---
+		// --- system: enforce 3-segment Claude Code structure ---
+		// system[0]: billing header (no cache_control)
+		// system[1]: identity line (with cache_control)
+		// system[2]: full instructions (with cache_control)
+		const billingBlock = { type: 'text', text: BILLING_HEADER_TEXT };
 		const identityBlock = {
 			type: 'text',
-			text: CLAUDE_CODE_IDENTITY_TEXT,
+			text: IDENTITY_TEXT,
+			cache_control: { type: 'ephemeral' },
+		};
+		const instructionsBlock = {
+			type: 'text',
+			text: SYSTEM_INSTRUCTIONS_TEXT,
 			cache_control: { type: 'ephemeral' },
 		};
 		const systemArray = normalizeSystemToArray(bodyObj.system);
 
 		if (systemArray.length === 0) {
-			bodyObj.system = [identityBlock];
+			// No system provided — inject full Claude Code system
+			bodyObj.system = [billingBlock, identityBlock, instructionsBlock];
+		} else if (
+			isRecord(systemArray[0]) &&
+			typeof (systemArray[0] as Record<string, unknown>).text === 'string' &&
+			((systemArray[0] as Record<string, unknown>).text as string).includes('x-anthropic-billing-header')
+		) {
+			// Already has billing header — this is from a real CLI. Preserve as-is
+			// but ensure cache_control is present on identity block.
+			if (systemArray.length >= 2 && isRecord(systemArray[1])) {
+				const second = systemArray[1] as Record<string, unknown>;
+				if (!isRecord(second.cache_control)) {
+					second.cache_control = { type: 'ephemeral' };
+				}
+			}
+			bodyObj.system = systemArray;
 		} else if (hasClaudeCodeIdentity(systemArray[0])) {
-			// Already has identity; ensure cache_control is present
+			// Has identity line but no billing header — prepend billing + ensure instructions
 			const first = systemArray[0] as Record<string, unknown>;
 			if (!isRecord(first.cache_control)) {
 				first.cache_control = { type: 'ephemeral' };
 			}
-			bodyObj.system = systemArray;
+			// Check if any subsequent block looks like the full instructions
+			const hasInstructions = systemArray.slice(1).some(
+				(b) => isRecord(b) && typeof (b as Record<string, unknown>).text === 'string' &&
+					((b as Record<string, unknown>).text as string).length > 5000,
+			);
+			if (hasInstructions) {
+				bodyObj.system = [billingBlock, ...systemArray];
+			} else {
+				bodyObj.system = [billingBlock, ...systemArray, instructionsBlock];
+			}
 		} else {
-			// Client has its own system prompt — prepend identity before it
-			bodyObj.system = [identityBlock, ...systemArray];
+			// Client has its own system prompt — prepend full Claude Code structure
+			bodyObj.system = [billingBlock, identityBlock, instructionsBlock, ...systemArray];
 		}
 
 		// --- tools: upstream expects non-empty tools for claude-code mode ---
 		if (!Array.isArray(bodyObj.tools) || (bodyObj.tools as unknown[]).length === 0) {
-			bodyObj.tools = JSON.parse(JSON.stringify(MINIMAL_CLAUDE_CODE_TOOLS));
+			bodyObj.tools = JSON.parse(JSON.stringify(CLAUDE_CODE_TOOLS));
 		}
 
 		// --- metadata: user_id must match Claude Code session format ---
@@ -395,6 +334,11 @@ export function normalizeRequest(
 			metadata.user_id = buildClaudeCodeUserId();
 		}
 		bodyObj.metadata = metadata;
+
+		// --- output_config: required for effort-based thinking (opus only) ---
+		if (rule.anthropicBeta.includes('effort-') && !isRecord(bodyObj.output_config)) {
+			bodyObj.output_config = { effort: 'medium' };
+		}
 	} else {
 		// Non-claude-code models (haiku): lenient defaults
 		const hasValidSystem =
@@ -402,7 +346,7 @@ export function normalizeRequest(
 			(typeof bodyObj.system === 'string' && (bodyObj.system as string).trim().length > 0);
 
 		if (!hasValidSystem) {
-			bodyObj.system = [{ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }];
+			bodyObj.system = [{ type: 'text', text: IDENTITY_TEXT }];
 		}
 
 		// Empty tools [] is valid for haiku (e.g. topic-detection requests).
