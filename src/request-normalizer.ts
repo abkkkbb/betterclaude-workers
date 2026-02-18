@@ -82,6 +82,115 @@ const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['x-app', 'cli'],
 ];
 
+/** System prompt identity text that upstream expects as the first system block */
+const CLAUDE_CODE_IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/** Pattern for Claude Code session user_id: user_{hex}_account__session_{uuid} */
+const CLAUDE_CODE_USER_ID_PATTERN = /^user_[a-f0-9]+_account__session_[0-9a-f-]{36}$/;
+
+/**
+ * Minimal set of Claude Code tools that upstream expects for claude-code mode.
+ * Tool names and parameter names match real Claude Code CLI definitions.
+ */
+const MINIMAL_CLAUDE_CODE_TOOLS: ReadonlyArray<Record<string, unknown>> = [
+	{
+		name: 'Bash',
+		description: 'Executes a given bash command with optional timeout.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				command: { description: 'The command to execute', type: 'string' },
+				timeout: { description: 'Optional timeout in milliseconds (max 600000)', type: 'number' },
+				description: { description: 'Description of what this command does', type: 'string' },
+			},
+			required: ['command'],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: 'Read',
+		description: 'Reads a file from the local filesystem.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				file_path: { description: 'The absolute path to the file to read', type: 'string' },
+				offset: { description: 'The line number to start reading from', type: 'number' },
+				limit: { description: 'The number of lines to read', type: 'number' },
+			},
+			required: ['file_path'],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: 'Edit',
+		description: 'Performs exact string replacements in files.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				file_path: { description: 'The absolute path to the file to modify', type: 'string' },
+				old_string: { description: 'The text to replace', type: 'string' },
+				new_string: { description: 'The text to replace it with', type: 'string' },
+				replace_all: { description: 'Replace all occurrences', default: false, type: 'boolean' },
+			},
+			required: ['file_path', 'old_string', 'new_string'],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: 'Write',
+		description: 'Writes a file to the local filesystem.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				file_path: { description: 'The absolute path to the file to write', type: 'string' },
+				content: { description: 'The content to write to the file', type: 'string' },
+			},
+			required: ['file_path', 'content'],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: 'Glob',
+		description: 'Fast file pattern matching tool that works with any codebase size.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				pattern: { description: 'The glob pattern to match files against', type: 'string' },
+				path: { description: 'The directory to search in', type: 'string' },
+			},
+			required: ['pattern'],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: 'Grep',
+		description: 'A powerful search tool built on ripgrep.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				pattern: { description: 'The regex pattern to search for', type: 'string' },
+				path: { description: 'File or directory to search in', type: 'string' },
+			},
+			required: ['pattern'],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: 'Task',
+		description: 'Launch a new agent to handle complex, multi-step tasks autonomously.',
+		input_schema: {
+			type: 'object',
+			properties: {
+				description: { description: 'A short description of the task', type: 'string' },
+				prompt: { description: 'The task for the agent to perform', type: 'string' },
+				subagent_type: { description: 'The type of specialized agent to use', type: 'string' },
+			},
+			required: ['description', 'prompt', 'subagent_type'],
+			additionalProperties: false,
+		},
+	},
+];
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -93,6 +202,34 @@ function isAnyrouterTarget(host: string): boolean {
 function findMatchingRule(model: string): ModelRule | undefined {
 	const lower = model.toLowerCase();
 	return MODEL_RULES.find((rule) => lower.includes(rule.keyword));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Normalize system field to array format.
+ * Handles: array (pass-through), string (wrap in text block), other (empty).
+ */
+function normalizeSystemToArray(system: unknown): unknown[] {
+	if (Array.isArray(system)) return [...system];
+	if (typeof system === 'string' && system.trim().length > 0) {
+		return [{ type: 'text', text: system }];
+	}
+	return [];
+}
+
+/** Check whether a system block contains the Claude Code identity text */
+function hasClaudeCodeIdentity(block: unknown): boolean {
+	return isRecord(block) && typeof block.text === 'string' && block.text.includes(CLAUDE_CODE_IDENTITY_TEXT);
+}
+
+/** Generate a user_id matching the Claude Code session format */
+function buildClaudeCodeUserId(): string {
+	const hash = crypto.randomUUID().replace(/-/g, '');
+	const sessionId = crypto.randomUUID();
+	return `user_${hash}_account__session_${sessionId}`;
 }
 
 /**
@@ -221,31 +358,61 @@ export function normalizeRequest(
 		bodyObj.stream = true;
 	}
 
-	// 7. Ensure minimal required body fields for upstream validation
-	// Preserve client-provided system prompt when present; only fill defaults
-	// when system is missing or empty. This avoids destroying the caller's
-	// actual instructions and cache_control markers.
-	const hasValidSystem =
-		(Array.isArray(bodyObj.system) && (bodyObj.system as unknown[]).length > 0) ||
-		(typeof bodyObj.system === 'string' && (bodyObj.system as string).trim().length > 0);
+	// 7. Ensure body fields satisfy upstream claude-code validation.
+	// For claude-code models (sonnet/opus): enforce identity shape while
+	// preserving the client's own system content alongside it.
+	if (rule.requireClaudeCodeIdentity) {
+		// --- system: ensure Claude Code identity is the first element ---
+		const identityBlock = {
+			type: 'text',
+			text: CLAUDE_CODE_IDENTITY_TEXT,
+			cache_control: { type: 'ephemeral' },
+		};
+		const systemArray = normalizeSystemToArray(bodyObj.system);
 
-	if (!hasValidSystem) {
-		bodyObj.system = [
-			{
-				type: 'text',
-				text: "You are Claude Code, Anthropic's official CLI for Claude.",
-				...(rule.requireClaudeCodeIdentity ? { cache_control: { type: 'ephemeral' } } : {}),
-			},
-		];
-	}
+		if (systemArray.length === 0) {
+			bodyObj.system = [identityBlock];
+		} else if (hasClaudeCodeIdentity(systemArray[0])) {
+			// Already has identity; ensure cache_control is present
+			const first = systemArray[0] as Record<string, unknown>;
+			if (!isRecord(first.cache_control)) {
+				first.cache_control = { type: 'ephemeral' };
+			}
+			bodyObj.system = systemArray;
+		} else {
+			// Client has its own system prompt — prepend identity before it
+			bodyObj.system = [identityBlock, ...systemArray];
+		}
 
-	// Empty tools array [] is valid (e.g. haiku topic-detection requests).
-	// Only fill when tools is entirely missing or not an array.
-	if (bodyObj.tools === undefined || !Array.isArray(bodyObj.tools)) {
-		bodyObj.tools = [];
-	}
-	if (!bodyObj.metadata) {
-		bodyObj.metadata = { user_id: 'normalized-request' };
+		// --- tools: upstream expects non-empty tools for claude-code mode ---
+		if (!Array.isArray(bodyObj.tools) || (bodyObj.tools as unknown[]).length === 0) {
+			bodyObj.tools = JSON.parse(JSON.stringify(MINIMAL_CLAUDE_CODE_TOOLS));
+		}
+
+		// --- metadata: user_id must match Claude Code session format ---
+		const metadata = isRecord(bodyObj.metadata) ? { ...bodyObj.metadata } : {};
+		if (typeof metadata.user_id !== 'string' || !CLAUDE_CODE_USER_ID_PATTERN.test(metadata.user_id)) {
+			metadata.user_id = buildClaudeCodeUserId();
+		}
+		bodyObj.metadata = metadata;
+	} else {
+		// Non-claude-code models (haiku): lenient defaults
+		const hasValidSystem =
+			(Array.isArray(bodyObj.system) && (bodyObj.system as unknown[]).length > 0) ||
+			(typeof bodyObj.system === 'string' && (bodyObj.system as string).trim().length > 0);
+
+		if (!hasValidSystem) {
+			bodyObj.system = [{ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }];
+		}
+
+		// Empty tools [] is valid for haiku (e.g. topic-detection requests).
+		if (bodyObj.tools === undefined || !Array.isArray(bodyObj.tools)) {
+			bodyObj.tools = [];
+		}
+
+		if (!bodyObj.metadata) {
+			bodyObj.metadata = { user_id: 'normalized-request' };
+		}
 	}
 	if (!bodyObj.max_tokens) {
 		bodyObj.max_tokens = 32000;
