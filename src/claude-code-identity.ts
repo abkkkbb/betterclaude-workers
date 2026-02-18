@@ -1,7 +1,7 @@
 /**
  * Claude Code CLI identity data for anyrouter.top request normalization.
  *
- * Constants extracted from real Claude Code CLI v2.1.45 requests.
+ * Constants extracted from real Claude Code CLI v2.1.45.760 requests.
  * These are used to construct system prompts and tool definitions
  * that pass upstream validation.
  */
@@ -26,7 +26,7 @@ export const SYSTEM_INSTRUCTIONS_TEXT: string = "\nYou are an interactive CLI to
 
 /**
  * Full set of 20 Claude Code CLI tools with complete schemas.
- * Tool names, descriptions, and input_schemas match real CLI v2.1.45 definitions.
+ * Tool names, descriptions, and input_schemas match real CLI v2.1.45.760 definitions.
  */
 export const CLAUDE_CODE_TOOLS: ReadonlyArray<Record<string, unknown>> = JSON.parse(
 	'[{"name": "Task", "description": "Launch a new agent to handle complex, multi-step tasks autonomously.\\n\\nThe Task tool ' +
