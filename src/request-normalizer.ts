@@ -54,15 +54,15 @@ const MODEL_RULES: readonly ModelRule[] = [
 	{
 		keyword: 'sonnet',
 		anthropicBeta:
-			'claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05',
-		thinking: { type: 'enabled', budget_tokens: 10000 },
+			'claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,adaptive-thinking-2026-01-28',
+		thinking: { type: 'adaptive' },
 		removeTemperature: true,
 		requireClaudeCodeIdentity: true,
 	},
 	{
 		keyword: 'opus',
 		anthropicBeta:
-			'claude-code-20250219,adaptive-thinking-2026-01-28,prompt-caching-scope-2026-01-05,effort-2025-11-24',
+			'claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,adaptive-thinking-2026-01-28',
 		thinking: { type: 'adaptive' },
 		removeTemperature: true,
 		requireClaudeCodeIdentity: true,
@@ -76,7 +76,7 @@ const MODEL_RULES: readonly ModelRule[] = [
 const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['Accept', 'application/json'],
 	['Accept-Encoding', 'gzip, deflate, br, zstd'],
-	['User-Agent', 'claude-cli/2.1.45 (external, cli)'],
+	['User-Agent', 'claude-cli/2.1.50 (external, cli)'],
 	['X-Stainless-Arch', 'x64'],
 	['X-Stainless-Lang', 'js'],
 	['X-Stainless-OS', 'Windows'],
@@ -265,14 +265,13 @@ export function normalizeRequest(
 	// and expect a non-streaming JSON response. Do NOT force stream=true.
 
 	// 7. Ensure body fields satisfy upstream claude-code validation.
-	// For claude-code models (sonnet/opus): enforce full 3-segment system
-	// structure [billing, identity, instructions] plus tools and metadata.
+	// For claude-code models (sonnet/opus): enforce Claude Code system
+	// structure plus tools and metadata.
+	// Supports both legacy 3-block [billing, identity, instructions] and
+	// new 2-block [identity, instructions] formats depending on whether
+	// BILLING_HEADER_TEXT is populated.
 	if (rule.requireClaudeCodeIdentity) {
-		// --- system: enforce 3-segment Claude Code structure ---
-		// system[0]: billing header (no cache_control)
-		// system[1]: identity line (with cache_control)
-		// system[2]: full instructions (with cache_control)
-		const billingBlock = { type: 'text', text: BILLING_HEADER_TEXT };
+		const hasBilling = BILLING_HEADER_TEXT.length > 0;
 		const identityBlock = {
 			type: 'text',
 			text: IDENTITY_TEXT,
@@ -283,11 +282,17 @@ export function normalizeRequest(
 			text: SYSTEM_INSTRUCTIONS_TEXT,
 			cache_control: { type: 'ephemeral' },
 		};
+
+		// Build the canonical system prefix (with or without billing)
+		const canonicalPrefix = hasBilling
+			? [{ type: 'text', text: BILLING_HEADER_TEXT }, identityBlock, instructionsBlock]
+			: [identityBlock, instructionsBlock];
+
 		const systemArray = normalizeSystemToArray(bodyObj.system);
 
 		if (systemArray.length === 0) {
 			// No system provided — inject full Claude Code system
-			bodyObj.system = [billingBlock, identityBlock, instructionsBlock];
+			bodyObj.system = canonicalPrefix;
 		} else if (
 			isRecord(systemArray[0]) &&
 			typeof (systemArray[0] as Record<string, unknown>).text === 'string' &&
@@ -303,7 +308,7 @@ export function normalizeRequest(
 			}
 			bodyObj.system = systemArray;
 		} else if (hasClaudeCodeIdentity(systemArray[0])) {
-			// Has identity line but no billing header — prepend billing + ensure instructions
+			// Has identity line but no billing header — ensure instructions present
 			const first = systemArray[0] as Record<string, unknown>;
 			if (!isRecord(first.cache_control)) {
 				first.cache_control = { type: 'ephemeral' };
@@ -313,14 +318,23 @@ export function normalizeRequest(
 				(b) => isRecord(b) && typeof (b as Record<string, unknown>).text === 'string' &&
 					((b as Record<string, unknown>).text as string).length > 5000,
 			);
-			if (hasInstructions) {
-				bodyObj.system = [billingBlock, ...systemArray];
+			if (hasBilling) {
+				const billingBlock = { type: 'text', text: BILLING_HEADER_TEXT };
+				if (hasInstructions) {
+					bodyObj.system = [billingBlock, ...systemArray];
+				} else {
+					bodyObj.system = [billingBlock, ...systemArray, instructionsBlock];
+				}
 			} else {
-				bodyObj.system = [billingBlock, ...systemArray, instructionsBlock];
+				if (hasInstructions) {
+					bodyObj.system = systemArray;
+				} else {
+					bodyObj.system = [...systemArray, instructionsBlock];
+				}
 			}
 		} else {
 			// Client has its own system prompt — prepend full Claude Code structure
-			bodyObj.system = [billingBlock, identityBlock, instructionsBlock, ...systemArray];
+			bodyObj.system = [...canonicalPrefix, ...systemArray];
 		}
 
 		// --- tools: upstream expects non-empty tools for claude-code mode ---
