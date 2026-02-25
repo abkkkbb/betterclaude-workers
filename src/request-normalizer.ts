@@ -20,8 +20,13 @@ import {
 interface ModelRule {
 	/** Substring to match against body.model (case-insensitive) */
 	keyword: string;
-	/** Value to set for the anthropic-beta request header */
-	anthropicBeta: string;
+	/**
+	 * Beta flags this model MUST have.  These are merged additively into the
+	 * client's existing `anthropic-beta` header — never replacing it wholesale —
+	 * so client-negotiated flags (e.g. `context-1m-2025-08-07`,
+	 * `structured-outputs-2025-12-15`) are always preserved.
+	 */
+	requiredBetaFlags: readonly string[];
 	/** Thinking configuration to inject into body; undefined = remove thinking */
 	thinking?: Record<string, unknown>;
 	/** Whether to strip body.temperature (required when thinking is enabled) */
@@ -45,24 +50,44 @@ export interface NormalizeResult {
 const MODEL_RULES: readonly ModelRule[] = [
 	{
 		keyword: 'haiku',
-		anthropicBeta:
-			'interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15',
+		// Only the two flags real CLI always sends for haiku.
+		// `structured-outputs-2025-12-15` is present in topic-detection requests
+		// but absent in token-count fallback requests — preserve whatever the
+		// client already sent rather than forcing it onto every haiku call.
+		requiredBetaFlags: [
+			'interleaved-thinking-2025-05-14',
+			'prompt-caching-scope-2026-01-05',
+		],
 		// haiku: no thinking config
 		removeTemperature: false,
 		requireClaudeCodeIdentity: false,
 	},
 	{
 		keyword: 'sonnet',
-		anthropicBeta:
-			'claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,adaptive-thinking-2026-01-28',
+		// `context-1m-2025-08-07` is intentionally omitted: real CLI only sends
+		// it when 1M-context mode is active.  Preserve it if the client supplied
+		// it; do not inject it unconditionally.
+		requiredBetaFlags: [
+			'claude-code-20250219',
+			'interleaved-thinking-2025-05-14',
+			'prompt-caching-scope-2026-01-05',
+			'effort-2025-11-24',
+			'adaptive-thinking-2026-01-28',
+		],
 		thinking: { type: 'adaptive' },
 		removeTemperature: true,
 		requireClaudeCodeIdentity: true,
 	},
 	{
 		keyword: 'opus',
-		anthropicBeta:
-			'claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,adaptive-thinking-2026-01-28',
+		// Same rationale as sonnet: `context-1m-2025-08-07` is client-controlled.
+		requiredBetaFlags: [
+			'claude-code-20250219',
+			'interleaved-thinking-2025-05-14',
+			'prompt-caching-scope-2026-01-05',
+			'effort-2025-11-24',
+			'adaptive-thinking-2026-01-28',
+		],
 		thinking: { type: 'adaptive' },
 		removeTemperature: true,
 		requireClaudeCodeIdentity: true,
@@ -76,7 +101,7 @@ const MODEL_RULES: readonly ModelRule[] = [
 const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['Accept', 'application/json'],
 	['Accept-Encoding', 'gzip, deflate, br, zstd'],
-	['User-Agent', 'claude-cli/2.1.50 (external, cli)'],
+	['User-Agent', 'claude-cli/2.1.56 (external, cli)'],
 	['X-Stainless-Arch', 'x64'],
 	['X-Stainless-Lang', 'js'],
 	['X-Stainless-OS', 'Windows'],
@@ -104,6 +129,37 @@ function isAnyrouterTarget(host: string): boolean {
 function findMatchingRule(model: string): ModelRule | undefined {
 	const lower = model.toLowerCase();
 	return MODEL_RULES.find((rule) => lower.includes(rule.keyword));
+}
+
+/**
+ * Merge model-required beta flags into the client's existing `anthropic-beta`
+ * header value without discarding any flags the client already negotiated.
+ *
+ * Algorithm:
+ *   1. Split the existing header value by comma, trim each token, drop empties.
+ *   2. Insert each token into a Set (deduplicates automatically).
+ *   3. Append any flag from `required` that is not yet in the Set.
+ *   4. Return the Set members joined by commas, preserving insertion order
+ *      (existing flags first, new required flags appended at the end).
+ *
+ * This guarantees that:
+ *   - Client-negotiated flags such as `context-1m-2025-08-07` and
+ *     `structured-outputs-2025-12-15` are never stripped.
+ *   - Every flag in `required` is present in the final header value.
+ *
+ * @param existing - Raw `anthropic-beta` header value from the incoming request,
+ *                   or null if the header was absent.
+ * @param required - Flags the matched model rule mandates.
+ * @returns Comma-separated merged flag string with no duplicates.
+ */
+function mergeBetaFlags(existing: string | null, required: readonly string[]): string {
+	const presentFlags = new Set(
+		(existing ?? '').split(',').map((f) => f.trim()).filter((f) => f.length > 0),
+	);
+	for (const flag of required) {
+		presentFlags.add(flag);
+	}
+	return [...presentFlags].join(',');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -183,7 +239,8 @@ function applyClaudeCodeHeaders(headers: Headers): void {
  *
  * When the target host contains "anyrouter.top" and body.model matches a known
  * model family (haiku / sonnet / opus), the function:
- *   1. Overwrites the `anthropic-beta` header with the model-specific value
+ *   1. Merges required beta flags into the existing `anthropic-beta` header
+ *      (additive: client flags are preserved; only missing required flags are appended)
  *   2. Sets or removes `body.thinking` per model requirements
  *   3. Removes `body.temperature` when thinking is active
  *   4. Strips browser fingerprint headers and force-sets Claude Code identity
@@ -232,8 +289,9 @@ export function normalizeRequest(
 
 	// --- Apply normalizations ---
 
-	// 1. Overwrite anthropic-beta header
-	headers.set('anthropic-beta', rule.anthropicBeta);
+	// 1. Merge required beta flags into the client's existing anthropic-beta header.
+	// Additive: client flags are preserved; only missing required flags are appended.
+	headers.set('anthropic-beta', mergeBetaFlags(headers.get('anthropic-beta'), rule.requiredBetaFlags));
 
 	// 2. Set or remove thinking
 	if (rule.thinking) {
@@ -349,8 +407,8 @@ export function normalizeRequest(
 		}
 		bodyObj.metadata = metadata;
 
-		// --- output_config: required for effort-based thinking (opus only) ---
-		if (rule.anthropicBeta.includes('effort-') && !isRecord(bodyObj.output_config)) {
+		// --- output_config: required for effort-based thinking (sonnet/opus) ---
+		if (rule.requiredBetaFlags.some((f) => f.startsWith('effort-')) && !isRecord(bodyObj.output_config)) {
 			bodyObj.output_config = { effort: 'medium' };
 		}
 	} else {
