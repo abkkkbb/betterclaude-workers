@@ -195,6 +195,46 @@ function buildClaudeCodeUserId(): string {
 }
 
 /**
+ * Determine whether the incoming request originates from the Claude  Code CLI
+ * rather than a generic Web UI or OpenAI-compatible client (e.g. Open WebUI).
+ *
+ * Any one of the following conditions is sufficient to identify a CLI request:
+ *   1. `anthropic-beta` already contains `claude-code-20250219` — real CLI always
+ *      negotiates this flag; generic clients do not.
+ *   2. The first `system` block's text contains `x-anthropic-billing-header` —
+ *      the billing-envelope sentinel injected by the CLI's session initialisation.
+ *   3. `User-Agent` starts with `claude-cli/`.
+ *
+ * IMPORTANT: Must be called BEFORE `applyClaudeCodeHeaders`, which unconditionally
+ * overwrites the User-Agent to `claude-cli/2.1.56 (external, cli)`, making
+ * condition 3 permanently true afterwards.
+ */
+function isClaudeCodeCliRequest(
+	headers: Headers,
+	bodyObj: Record<string, unknown>,
+): boolean {
+	// Condition 1: CLI-exclusive anthropic-beta flag
+	const betaFlags = (headers.get('anthropic-beta') ?? '')
+		.split(',')
+		.map((f) => f.trim());
+	if (betaFlags.includes('claude-code-20250219')) return true;
+
+	// Condition 2: billing-envelope sentinel in first system block
+	const systemArray = normalizeSystemToArray(bodyObj.system);
+	if (
+		systemArray.length > 0 &&
+		isRecord(systemArray[0]) &&
+		typeof (systemArray[0] as Record<string, unknown>).text === 'string' &&
+		((systemArray[0] as Record<string, unknown>).text as string).includes('x-anthropic-billing-header')
+	) {
+		return true;
+	}
+
+	// Condition 3: CLI User-Agent prefix (valid only before applyClaudeCodeHeaders)
+	return (headers.get('user-agent') ?? '').startsWith('claude-cli/');
+}
+
+/**
  * Browser fingerprint headers that must be stripped for anyrouter.top.
  * Electron/browser clients (e.g. Cherry Studio) send these automatically;
  * their presence exposes the request as non-CLI and triggers upstream rejection.
@@ -246,8 +286,10 @@ function applyClaudeCodeHeaders(headers: Headers): void {
  *   4. Strips browser fingerprint headers and force-sets Claude Code identity
  *   5. Normalizes auth header (x-api-key → Authorization Bearer)
  *   6. Forces `body.stream = true`
- *   7. Ensures `body.system`, `body.tools`, `body.metadata`, `body.max_tokens` have
- *      valid defaults (preserves client-provided system/tools when present)
+ *   7. Ensures `body.system`, `body.tools`, `body.metadata`, `body.max_tokens` satisfy
+ *      upstream requirements.  CLI requests receive full normalization (system identity,
+ *      CLAUDE_CODE_TOOLS, metadata.user_id).  Generic Web UI requests receive lightweight
+ *      normalization (identity prefix prepended, tools preserved as-is, metadata.user_id).
  *   8. Removes stale `content-length` so fetch() recalculates from new body
  *
  * For unrecognised models or non-anyrouter targets the request passes through
@@ -289,6 +331,14 @@ export function normalizeRequest(
 
 	// --- Apply normalizations ---
 
+	// Pre-step: Detect CLI origin from the unmodified client headers.
+	// This MUST run before mergeBetaFlags (step 1), which unconditionally injects
+	// `claude-code-20250219` for sonnet/opus — making condition 1 inside
+	// isClaudeCodeCliRequest permanently true for ALL clients if called afterwards.
+	const isCli = rule.requireClaudeCodeIdentity
+		? isClaudeCodeCliRequest(headers, bodyObj)
+		: false; // haiku never requires identity differentiation
+
 	// 1. Merge required beta flags into the client's existing anthropic-beta header.
 	// Additive: client flags are preserved; only missing required flags are appended.
 	headers.set('anthropic-beta', mergeBetaFlags(headers.get('anthropic-beta'), rule.requiredBetaFlags));
@@ -328,7 +378,10 @@ export function normalizeRequest(
 	// Supports both legacy 3-block [billing, identity, instructions] and
 	// new 2-block [identity, instructions] formats depending on whether
 	// BILLING_HEADER_TEXT is populated.
-	if (rule.requireClaudeCodeIdentity) {
+	if (rule.requireClaudeCodeIdentity && isCli) {
+		// -------------------------------------------------------------------------
+		// CLI path: full normalization — repairs any gaps in a real CLI request
+		// -------------------------------------------------------------------------
 		const hasBilling = BILLING_HEADER_TEXT.length > 0;
 		const identityBlock = {
 			type: 'text',
@@ -408,6 +461,57 @@ export function normalizeRequest(
 		bodyObj.metadata = metadata;
 
 		// --- output_config: required for effort-based thinking (sonnet/opus) ---
+		if (rule.requiredBetaFlags.some((f) => f.startsWith('effort-')) && !isRecord(bodyObj.output_config)) {
+			bodyObj.output_config = { effort: 'medium' };
+		}
+	} else if (rule.requireClaudeCodeIdentity && !isCli) {
+		// -------------------------------------------------------------------------
+		// Generic path: Web UI / OpenAI-compatible clients (sonnet / opus).
+		// Fix headers only; preserve the client's tools and system prompt structure
+		// to avoid token bloat and model behaviour changes.
+		// -------------------------------------------------------------------------
+		const hasBilling = BILLING_HEADER_TEXT.length > 0;
+		const identityBlock = {
+			type: 'text',
+			text: IDENTITY_TEXT,
+			cache_control: { type: 'ephemeral' },
+		};
+		const instructionsBlock = {
+			type: 'text',
+			text: SYSTEM_INSTRUCTIONS_TEXT,
+			cache_control: { type: 'ephemeral' },
+		};
+		const canonicalPrefix = hasBilling
+			? [{ type: 'text', text: BILLING_HEADER_TEXT }, identityBlock, instructionsBlock]
+			: [identityBlock, instructionsBlock];
+
+		// System: prepend canonical identity only when not already present.
+		// The client's own system prompt is preserved immediately after.
+		const systemArray = normalizeSystemToArray(bodyObj.system);
+		const alreadyHasIdentity = systemArray.some((b) => hasClaudeCodeIdentity(b));
+		if (alreadyHasIdentity) {
+			bodyObj.system = systemArray;
+		} else {
+			bodyObj.system = systemArray.length > 0
+				? [...canonicalPrefix, ...systemArray]
+				: canonicalPrefix;
+		}
+
+		// Tools: do NOT inject CLAUDE_CODE_TOOLS for generic clients — that would
+		// massively inflate token usage and cause the model to act as a coding CLI.
+		// Keep whatever tools the client sent; default to [] only when absent.
+		if (!Array.isArray(bodyObj.tools)) {
+			bodyObj.tools = [];
+		}
+
+		// Metadata: enforce valid user_id format (same rule as CLI path).
+		const metadata = isRecord(bodyObj.metadata) ? { ...bodyObj.metadata } : {};
+		if (typeof metadata.user_id !== 'string' || !CLAUDE_CODE_USER_ID_PATTERN.test(metadata.user_id)) {
+			metadata.user_id = buildClaudeCodeUserId();
+		}
+		bodyObj.metadata = metadata;
+
+		// output_config: inject effort default when absent (same as CLI path).
 		if (rule.requiredBetaFlags.some((f) => f.startsWith('effort-')) && !isRecord(bodyObj.output_config)) {
 			bodyObj.output_config = { effort: 'medium' };
 		}

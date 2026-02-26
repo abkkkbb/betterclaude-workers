@@ -27,8 +27,13 @@ const FIXABLE_PATHS = new Set(['', 'messages', 'v1', 'v1/messages']);
  *     and the CLI falls back to a haiku max_tokens=1 probe.  Letting the 404 flow
  *     through means the CLI's fallback logic fires correctly regardless of whether
  *     the upstream ever adds support for the endpoint.
+ *   - v1/chat/completions – OpenAI-compatible endpoint used by Web UI clients
+ *     (Open WebUI, hapi, etc.).  Forwarded verbatim; upstream routing applies.
  */
-const PASSTHROUGH_PATHS = new Set(['v1/messages/count_tokens']);
+const PASSTHROUGH_PATHS = new Set([
+	'v1/messages/count_tokens',
+	'v1/chat/completions',
+]);
 
 /**
  * Normalize the path segment after /claude/{host}/.
