@@ -460,10 +460,12 @@ export function normalizeRequest(
 		}
 		bodyObj.metadata = metadata;
 
-		// --- output_config: required for effort-based thinking (sonnet/opus) ---
-		if (rule.requiredBetaFlags.some((f) => f.startsWith('effort-')) && !isRecord(bodyObj.output_config)) {
-			bodyObj.output_config = { effort: 'medium' };
-		}
+		// output_config: real CLI does NOT send output_config for sonnet/opus.
+		// Adaptive thinking (thinking.type=adaptive) determines effort level
+		// automatically. Injecting output_config.effort would be extraneous and
+		// may trigger "invalid claude code request" on anyrouter.top.
+		// Only preserve output_config if the client explicitly provided one
+		// (e.g. structured-output format requests).
 	} else if (rule.requireClaudeCodeIdentity && !isCli) {
 		// -------------------------------------------------------------------------
 		// Generic path: Web UI / OpenAI-compatible clients (sonnet / opus).
@@ -497,11 +499,11 @@ export function normalizeRequest(
 				: canonicalPrefix;
 		}
 
-		// Tools: do NOT inject CLAUDE_CODE_TOOLS for generic clients — that would
-		// massively inflate token usage and cause the model to act as a coding CLI.
-		// Keep whatever tools the client sent; default to [] only when absent.
-		if (!Array.isArray(bodyObj.tools)) {
-			bodyObj.tools = [];
+		// Tools: anyrouter.top requires non-empty tools when claude-code-20250219
+		// beta flag is present for sonnet/opus models. Inject Claude Code tools
+		// when client did not provide any; preserve client tools if non-empty.
+		if (!Array.isArray(bodyObj.tools) || (bodyObj.tools as unknown[]).length === 0) {
+			bodyObj.tools = JSON.parse(JSON.stringify(CLAUDE_CODE_TOOLS));
 		}
 
 		// Metadata: enforce valid user_id format (same rule as CLI path).
@@ -511,10 +513,9 @@ export function normalizeRequest(
 		}
 		bodyObj.metadata = metadata;
 
-		// output_config: inject effort default when absent (same as CLI path).
-		if (rule.requiredBetaFlags.some((f) => f.startsWith('effort-')) && !isRecord(bodyObj.output_config)) {
-			bodyObj.output_config = { effort: 'medium' };
-		}
+		// output_config: same as CLI path — do NOT inject output_config.effort.
+		// Adaptive thinking determines effort automatically; extraneous
+		// output_config may cause upstream validation failures.
 	} else {
 		// Non-claude-code models (haiku): lenient defaults
 		const hasValidSystem =

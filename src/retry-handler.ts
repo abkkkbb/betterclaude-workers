@@ -20,6 +20,50 @@ function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/** Maximum number of retries for upstream 500 overload errors */
+const MAX_OVERLOAD_RETRIES = 2;
+
+/**
+ * Detect upstream 500 overload / rate-limit errors that are safe to retry.
+ *
+ * Matches patterns observed from anyrouter.top and common API gateways:
+ *   - "负载已经达到上限" (Chinese: load limit reached)
+ *   - "overload" / "overloaded"
+ *   - "rate limit"
+ *   - "capacity"
+ *
+ * The response body is read from a *clone* so the original remains consumable.
+ */
+async function isOverloadError(response: Response): Promise<boolean> {
+	if (response.status !== 500 && response.status !== 529 && response.status !== 503) {
+		return false;
+	}
+
+	try {
+		const text = await response.clone().text();
+		if (!text) return false;
+
+		let message = text;
+		try {
+			const parsed = JSON.parse(text);
+			message = parsed?.error?.message ?? parsed?.message ?? text;
+		} catch {
+			// body is not JSON — use raw text
+		}
+
+		const lower = message.toLowerCase();
+		return (
+			message.includes('\u8D1F\u8F7D\u5DF2\u7ECF\u8FBE\u5230\u4E0A\u9650') || // 负载已经达到上限
+			lower.includes('overload') ||
+			lower.includes('rate limit') ||
+			lower.includes('capacity') ||
+			lower.includes('too many requests')
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Make API call with current request body
  */
@@ -147,7 +191,22 @@ export async function retryWithCleanup(
 	const hadProactiveCleanup = cleanupResult.hadOrphans;
 
 	// === Step 2: First API call with proactively cleaned messages ===
-	const response = await makeApiCall(request, targetUrl, headers, cleanedBodyText);
+	let response = await makeApiCall(request, targetUrl, headers, cleanedBodyText);
+
+	// === Step 2.5: Retry transient 500 overload errors ===
+	// anyrouter.top may return 500/503/529 when the upstream model is at capacity.
+	// Retry up to MAX_OVERLOAD_RETRIES times with exponential back-off (1 s, 2 s).
+	if (await isOverloadError(response)) {
+		for (let attempt = 1; attempt <= MAX_OVERLOAD_RETRIES; attempt++) {
+			metadata.retryCount = attempt;
+			await sleep(1000 * (2 ** (attempt - 1))); // 1 s, 2 s
+
+			response = await makeApiCall(request, targetUrl, headers, cleanedBodyText);
+			if (!(await isOverloadError(response))) {
+				break;
+			}
+		}
+	}
 
 	// Handle streaming responses (pass through without buffering)
 	if (isStreamingResponse(response)) {
@@ -189,7 +248,7 @@ export async function retryWithCleanup(
 
 			// Track removed IDs
 			metadata.removedToolUseIds.push(...errorInfo.orphanedIds);
-			metadata.retryCount = 1;
+			metadata.retryCount += 1;
 
 			// Small delay before retry
 			await sleep(100);
