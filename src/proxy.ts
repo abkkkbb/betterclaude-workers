@@ -70,6 +70,17 @@ function buildUpstreamHeaders(request: Request, targetHost: string): Headers {
 	// Set Host header to target (required for HTTP/1.1)
 	headers.set('Host', targetHost);
 
+	// anyrouter.top: return clean headers without proxy identification.
+	// Extra forwarding / tracing headers (Via, X-Forwarded-*, X-Real-IP, etc.)
+	// expose the request as proxied and trigger upstream rejection.
+	if (targetHost.toLowerCase().includes('anyrouter.top')) {
+		// Defense-in-depth: strip any proxy-trace headers the client may carry
+		headers.delete('via');
+		headers.delete('x-correlation-id');
+		headers.delete('x-original-cf-ray');
+		return headers;
+	}
+
 	// === Client IP Information ===
 	// Get the real client IP from Cloudflare (most reliable source)
 	const clientIp = request.headers.get('CF-Connecting-IP') || '';

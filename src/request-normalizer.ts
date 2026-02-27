@@ -101,7 +101,7 @@ const MODEL_RULES: readonly ModelRule[] = [
 const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['Accept', 'application/json'],
 	['Accept-Encoding', 'gzip, deflate, br, zstd'],
-	['User-Agent', 'claude-cli/2.1.56 (external, cli)'],
+	['User-Agent', 'claude-cli/2.1.59 (external, sdk-ts)'],
 	['X-Stainless-Arch', 'x64'],
 	['X-Stainless-Lang', 'js'],
 	['X-Stainless-OS', 'Windows'],
@@ -114,6 +114,19 @@ const CLAUDE_CODE_HEADERS: ReadonlyArray<[string, string]> = [
 	['anthropic-version', '2023-06-01'],
 	['x-app', 'cli'],
 ];
+
+/**
+ * Protocol-critical headers that must always be force-set regardless of caller type.
+ * Runtime fingerprint headers (User-Agent, X-Stainless-*) are excluded — they are
+ * preserved for real CLI callers to avoid upstream mismatch detection.
+ */
+const PROTOCOL_CRITICAL_HEADERS = new Set([
+	'accept',
+	'accept-encoding',
+	'anthropic-dangerous-direct-browser-access',
+	'anthropic-version',
+	'x-app',
+]);
 
 /** Pattern for Claude Code session user_id: user_{hex}_account__session_{uuid} */
 const CLAUDE_CODE_USER_ID_PATTERN = /^user_[a-f0-9]+_account__session_[0-9a-f-]{36}$/;
@@ -205,8 +218,8 @@ function buildClaudeCodeUserId(): string {
  *      the billing-envelope sentinel injected by the CLI's session initialisation.
  *   3. `User-Agent` starts with `claude-cli/`.
  *
- * IMPORTANT: Must be called BEFORE `applyClaudeCodeHeaders`, which unconditionally
- * overwrites the User-Agent to `claude-cli/2.1.56 (external, cli)`, making
+ * IMPORTANT: Must be called BEFORE `applyClaudeCodeHeaders`, which may overwrite
+ * the User-Agent during normalization for non-CLI callers, making
  * condition 3 permanently true afterwards.
  */
 function isClaudeCodeCliRequest(
@@ -259,14 +272,23 @@ function stripBrowserHeaders(headers: Headers): void {
 }
 
 /**
- * Force-set Claude Code identification headers.
- * These are always overwritten (not "fill if missing") because the client's
- * original User-Agent / fingerprint headers would expose the real caller
- * and get blocked by upstream Cloudflare bot-detection (error 1010).
+ * Apply Claude Code identification headers.
+ *
+ * - Protocol-critical headers (Accept, anthropic-version, x-app, etc.) are always set.
+ * - Runtime fingerprint headers (User-Agent, X-Stainless-*) are only overwritten
+ *   for non-CLI callers. Real CLI callers keep their original values to avoid
+ *   upstream version/type mismatch detection.
+ *
+ * @param headers - Mutable Headers object
+ * @param overwriteAll - When true, overwrite all headers (non-CLI callers).
+ *                       When false, only set protocol-critical or missing headers.
  */
-function applyClaudeCodeHeaders(headers: Headers): void {
+function applyClaudeCodeHeaders(headers: Headers, overwriteAll: boolean): void {
 	for (const [key, value] of CLAUDE_CODE_HEADERS) {
-		headers.set(key, value);
+		const lowerKey = key.toLowerCase();
+		if (overwriteAll || PROTOCOL_CRITICAL_HEADERS.has(lowerKey) || !headers.has(key)) {
+			headers.set(key, value);
+		}
 	}
 }
 
@@ -331,7 +353,11 @@ export function normalizeRequest(
 
 	// --- Apply normalizations ---
 
-	// Pre-step: Detect CLI origin from the unmodified client headers.
+	// Pre-step A: Capture original User-Agent before any header mutations.
+	// Used to decide whether runtime fingerprint headers should be preserved.
+	const isOriginalCliRequest = (headers.get('user-agent') ?? '').startsWith('claude-cli/');
+
+	// Pre-step B: Detect CLI origin from the unmodified client headers.
 	// This MUST run before mergeBetaFlags (step 1), which unconditionally injects
 	// `claude-code-20250219` for sonnet/opus — making condition 1 inside
 	// isClaudeCodeCliRequest permanently true for ALL clients if called afterwards.
@@ -357,7 +383,7 @@ export function normalizeRequest(
 
 	// 4. Strip browser fingerprint headers then force Claude Code identity
 	stripBrowserHeaders(headers);
-	applyClaudeCodeHeaders(headers);
+	applyClaudeCodeHeaders(headers, !isOriginalCliRequest);
 
 	// 5. Normalize auth header: convert x-api-key to Authorization Bearer format
 	// Upstream may require Bearer format when claude-code beta is active
