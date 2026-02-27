@@ -131,6 +131,17 @@ const PROTOCOL_CRITICAL_HEADERS = new Set([
 /** Pattern for Claude Code session user_id: user_{hex}_account__session_{uuid} */
 const CLAUDE_CODE_USER_ID_PATTERN = /^user_[a-f0-9]+_account__session_[0-9a-f-]{36}$/;
 
+/**
+ * Stable identity prefix shared by all known Claude Code CLI versions.
+ *
+ * v2.1.50 and earlier: "You are Claude Code, Anthropic's official CLI for Claude."
+ * v2.1.59 and later:   "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
+ *
+ * Using startsWith on this common prefix (without trailing punctuation) makes
+ * detection forward-compatible with future suffix changes.
+ */
+const IDENTITY_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -195,9 +206,9 @@ function normalizeSystemToArray(system: unknown): unknown[] {
 	return [];
 }
 
-/** Check whether a system block contains the Claude Code identity text */
+/** Check whether a system block starts with the Claude Code identity prefix (version-agnostic) */
 function hasClaudeCodeIdentity(block: unknown): boolean {
-	return isRecord(block) && typeof block.text === 'string' && block.text.includes(IDENTITY_TEXT);
+	return isRecord(block) && typeof block.text === 'string' && block.text.startsWith(IDENTITY_PREFIX);
 }
 
 /** Generate a user_id matching the Claude Code session format */

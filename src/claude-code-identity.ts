@@ -1,7 +1,7 @@
 /**
  * Claude Code CLI identity data for anyrouter.top request normalization.
  *
- * Constants extracted from real Claude Code CLI v2.1.50 requests.
+ * Constants extracted from real Claude Code CLI v2.1.59 requests.
  * These are used to construct system prompts and tool definitions
  * that pass upstream validation.
  */
@@ -14,7 +14,7 @@
 export const BILLING_HEADER_TEXT = "";
 
 /** Identity line - system[0] in new format, system[1] in legacy format. */
-export const IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude.";
+export const IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.";
 
 /** Full Claude Code system instructions - system[1] in new format, system[2] in legacy format. */
 // Stored as a JSON-encoded string to avoid template-literal escaping issues.
